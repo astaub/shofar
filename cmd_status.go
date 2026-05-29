@@ -185,6 +185,26 @@ func cmdStatus(args []string) error {
 		fmt.Println()
 	}
 
+	// ── Orphaned/Idle Sessions ─────────────────────────────────────────────────
+	orphans := detectOrphanedSessions(s.snap, s.now)
+	if len(orphans) > 0 {
+		fmt.Println("Orphaned or Idle Sessions (suspicious candidates)")
+		fmt.Printf("  %-35s %10s %s\n", "Worktree", "Idle", "Status")
+		fmt.Printf("  %-35s %10s %s\n", "─────────────────────────────────", "────────", "─────────────")
+		for _, o := range orphans {
+			reason := o.reason
+			if len(reason) > 20 {
+				reason = reason[:17] + "..."
+			}
+			idleStr := ""
+			if o.idleMinutes > 0 {
+				idleStr = fmt.Sprintf("%dh %dm", o.idleMinutes/60, o.idleMinutes%60)
+			}
+			fmt.Printf("  %-35s %10s %s\n", o.wtName, idleStr, reason)
+		}
+		fmt.Println()
+	}
+
 	// ── All Worktrees ────────────────────────────────────────────────────────
 	wts := s.inv.WithProcs()
 	sort.Slice(wts, func(i, j int) bool { return wts[i].RSSBytes > wts[j].RSSBytes })
@@ -498,6 +518,13 @@ type emdashWT struct {
 	sessions int
 }
 
+// orphanedSession is a suspicious claude/codex session.
+type orphanedSession struct {
+	wtName       string
+	idleMinutes  int
+	reason       string // "reparented", "no TTY", "idle Xh"
+}
+
 // emdashWorktreesFromProcs aggregates claude/codex sessions by worktree cwd.
 func emdashWorktreesFromProcs(snap *proc.Snapshot) []emdashWT {
 	byPath := map[string]*emdashWT{}
@@ -557,5 +584,62 @@ func emdashWorktreesFromProcs(snap *proc.Snapshot) []emdashWT {
 		result = append(result, *wt)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].rss > result[j].rss })
+	return result
+}
+
+// detectOrphanedSessions finds claude/codex sessions that are likely orphaned or stuck.
+func detectOrphanedSessions(snap *proc.Snapshot, now time.Time) []orphanedSession {
+	const idleThresh = 1 * time.Hour
+
+	var result []orphanedSession
+
+	for _, p := range snap.Procs {
+		if p.Kind != proc.KindClaude && p.Kind != proc.KindCodex {
+			continue
+		}
+
+		wtName := cwdShortName(p.Cwd)
+		if wtName == "" {
+			wtName = "unknown"
+		}
+
+		reason := ""
+		idleMin := 0
+
+		// Reparented to launchd (parent died)
+		if p.PPID == 1 {
+			reason = "reparented (parent died)"
+		}
+
+		// No TTY and not actively in use
+		if p.TTY == "" || p.TTY == "??" {
+			if reason == "" {
+				reason = "no TTY"
+			} else {
+				reason += ", no TTY"
+			}
+		}
+
+		// Idle via TTY or no recent timestamp
+		idleTime, hasTTY := proc.TTYIdle(p, now)
+		if hasTTY && idleTime > idleThresh {
+			idleMin = int(idleTime.Minutes())
+			if reason == "" {
+				reason = fmt.Sprintf("idle %dh", idleMin/60)
+			} else {
+				reason += fmt.Sprintf(", idle %dh", idleMin/60)
+			}
+		}
+
+		if reason != "" {
+			result = append(result, orphanedSession{
+				wtName:      wtName,
+				idleMinutes: idleMin,
+				reason:      reason,
+			})
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool { return result[i].idleMinutes > result[j].idleMinutes })
 	return result
 }
