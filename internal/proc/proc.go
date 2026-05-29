@@ -223,6 +223,12 @@ func ParseEtime(etime string) time.Duration {
 // IsSelfAncestor reports whether pid is in our own parent chain.
 func (s *Snapshot) IsSelfAncestor(pid int) bool { return s.ancestors[pid] }
 
+// LookupPID returns the Proc for a given PID, if present in the snapshot.
+func (s *Snapshot) LookupPID(pid int) (*Proc, bool) {
+	p, ok := s.byPID[pid]
+	return p, ok
+}
+
 // computeAncestors walks the PPID chain from start up to the root.
 func computeAncestors(start int, byPID map[int]*Proc) map[int]bool {
 	anc := map[int]bool{}
