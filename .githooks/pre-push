@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Local CI gate — runs before every `git push`, no GitHub Actions / no spend.
+# Activate once per clone with:  git config core.hooksPath .githooks
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+echo "pre-push: go vet…"
+go vet ./...
+
+echo "pre-push: go build…"
+go build ./...
+
+echo "pre-push: go test…"
+go test ./...
+
+echo "pre-push: ok"
