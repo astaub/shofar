@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -141,17 +143,65 @@ func cmdStatus(args []string) error {
 		fmt.Println()
 	}
 
-	// ── Worktrees ─────────────────────────────────────────────────────────────
+	// ── Chrome domains ────────────────────────────────────────────────────────
+	domains := chromeDomainsFromAppleScript()
+	if len(domains) > 0 {
+		fmt.Println("Chrome (domains from open tabs)")
+		type domainEntry struct {
+			domain string
+			tabs   int
+		}
+		var entries []domainEntry
+		tabSum := map[string]int{}
+		for _, entry := range domains {
+			tabSum[entry.domain] += entry.tabs
+		}
+		for domain, count := range tabSum {
+			entries = append(entries, domainEntry{domain, count})
+		}
+		sort.Slice(entries, func(i, j int) bool { return entries[i].tabs > entries[j].tabs })
+		if len(entries) > 12 {
+			entries = entries[:12]
+		}
+		for _, e := range entries {
+			fmt.Printf("  %-40s %3d tabs\n", e.domain, e.tabs)
+		}
+		fmt.Println()
+	}
+
+	// ── Emdash Worktrees ──────────────────────────────────────────────────────
+	emdashWTs := emdashWorktreesFromProcs(s.snap)
+	if len(emdashWTs) > 0 {
+		fmt.Println("Emdash Worktrees (claude sessions)")
+		fmt.Printf("  %-45s %5s %5s\n", "Worktree", "Sess", "RAM")
+		fmt.Printf("  %-45s %5s %5s\n", "─────────────────────────────────────────────", "────", "───────")
+		for _, e := range emdashWTs {
+			wtName := e.name
+			if len(wtName) > 45 {
+				wtName = wtName[:42] + "..."
+			}
+			fmt.Printf("  %-45s %5d %5s\n", wtName, e.sessions, fmtBytes(uint64(e.rss)))
+		}
+		fmt.Println()
+	}
+
+	// ── All Worktrees ────────────────────────────────────────────────────────
 	wts := s.inv.WithProcs()
 	sort.Slice(wts, func(i, j int) bool { return wts[i].RSSBytes > wts[j].RSSBytes })
 	if len(wts) > 0 {
-		fmt.Println("Worktrees")
+		fmt.Println("All Worktrees")
+		fmt.Printf("  %-45s %8s %6s\n", "Name", "RAM", "Procs")
+		fmt.Printf("  %-45s %8s %6s\n", "─────────────────────────────────────────────", "───────", "─────")
 		for _, wt := range wts {
 			activity := ""
 			if wt.Active {
-				activity = "  active"
+				activity = " (active)"
 			}
-			fmt.Printf("  %-28s  %8s  %d procs%s\n", wt.Name, fmtBytes(wt.RSSBytes), len(wt.Procs), activity)
+			wtName := wt.Name
+			if len(wtName) > 45 {
+				wtName = wtName[:42] + "..."
+			}
+			fmt.Printf("  %-45s %8s %6d%s\n", wtName, fmtBytes(wt.RSSBytes), len(wt.Procs), activity)
 		}
 		fmt.Println()
 	}
@@ -388,4 +438,124 @@ func emitJSON(v any) error {
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
+}
+
+// chromeDomain is a domain with tab count from Chrome.
+type chromeDomain struct {
+	domain string
+	tabs   int
+}
+
+// chromeDomainsFromAppleScript queries Chrome via AppleScript to get open tab domains.
+// Returns empty slice if AppleScript fails or Chrome isn't running.
+func chromeDomainsFromAppleScript() []chromeDomain {
+	script := `tell application "Google Chrome"
+  set tabInfo to {}
+  repeat with w in windows
+    repeat with t in tabs of w
+      set end of tabInfo to URL of t
+    end repeat
+  end repeat
+  return tabInfo
+end tell`
+
+	cmd := exec.Command("osascript", "-e", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	domains := map[string]int{}
+	lines := strings.Split(string(out), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.HasPrefix(line, "http") {
+			continue
+		}
+		u, err := url.Parse(line)
+		if err != nil {
+			continue
+		}
+		host := u.Hostname()
+		if host == "" {
+			continue
+		}
+		host = strings.TrimPrefix(host, "www.")
+		domains[host]++
+	}
+
+	var result []chromeDomain
+	for domain, count := range domains {
+		result = append(result, chromeDomain{domain, count})
+	}
+	return result
+}
+
+// emdashWT is a worktree with Emdash sessions.
+type emdashWT struct {
+	name     string
+	rss      int64
+	sessions int
+}
+
+// emdashWorktreesFromProcs aggregates claude/codex sessions by worktree cwd.
+func emdashWorktreesFromProcs(snap *proc.Snapshot) []emdashWT {
+	byPath := map[string]*emdashWT{}
+
+	for _, p := range snap.Procs {
+		if p.RSSBytes == 0 {
+			continue
+		}
+		if p.Kind != proc.KindClaude && p.Kind != proc.KindCodex {
+			continue
+		}
+		// Only Emdash-spawned sessions
+		source := spawnSource(p, snap)
+		if source != "Emdash" {
+			continue
+		}
+
+		// Resolve cwd via lsof if needed
+		cwd := p.Cwd
+		if cwd == "" {
+			binLsof := "/usr/sbin/lsof"
+			cmd := exec.Command(binLsof, "-a", "-p", fmt.Sprintf("%d", p.PID), "-d", "cwd", "-Fn")
+			out, err := cmd.Output()
+			if err == nil {
+				for _, line := range strings.Split(string(out), "\n") {
+					if strings.HasPrefix(line, "n") {
+						cwd = line[1:]
+						break
+					}
+				}
+			}
+		}
+
+		// Extract worktree name from path: /Users/.../emdash/worktrees/.../<name>
+		wtName := ""
+		if strings.Contains(cwd, "/worktrees/") {
+			if idx := strings.Index(cwd, "/worktrees/"); idx >= 0 {
+				rest := cwd[idx+len("/worktrees/"):]
+				// Skip repo/team/branch levels, grab the leaf
+				parts := strings.Split(rest, "/")
+				wtName = parts[len(parts)-1]
+			}
+		}
+		if wtName == "" {
+			wtName = filepath.Base(cwd)
+		}
+
+		if _, ok := byPath[cwd]; !ok {
+			byPath[cwd] = &emdashWT{name: wtName, rss: 0, sessions: 0}
+		}
+		byPath[cwd].rss += int64(p.RSSBytes)
+		byPath[cwd].sessions++
+	}
+
+	var result []emdashWT
+	for _, wt := range byPath {
+		result = append(result, *wt)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].rss > result[j].rss })
+	return result
 }
