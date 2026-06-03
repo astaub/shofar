@@ -1,150 +1,90 @@
-# shofar
+# 🐏 shofar
 
-**Take back your RAM**
+**Take back your RAM.** A macOS CLI that turns memory state into decisions:
+*can this machine take another dev worktree, and what's safe to kill.*
 
-A macOS RAM guard for dev-worktree workflows. Unlike display-only monitors
-(htop, btop, glances), shofar **acts**: it tells agents whether the machine
-can take on another worktree, and it cleans up safe-to-kill stale dev processes
-before the machine runs out of memory.
+Built for running lots of git worktrees with their own dev servers and
+long-lived AI agent CLIs (Claude Code, Codex, cursor-agent) — the workload that
+quietly piles up RAM until the machine crawls. Unlike `htop`/`btop` (which only
+*display*) or Linux OOM killers (which only *react*), shofar acts: it gates new
+work on real headroom and cleans up stale dev processes safely.
 
-## Why
-
-Running many git worktrees with their own dev servers, plus long-lived AI agent
-CLIs (Claude Code, Codex, cursor-agent), quietly piles up RAM until the machine
-crawls. Existing OSS either only *displays* memory (htop/btop/glances/vmstat) or
-is a Linux-only reactive OOM killer (earlyoom/nohang/systemd-oomd) with no
-concept of "this is a stale dev server, safe to kill" or "can I start another
-one." shofar fills that gap, macOS-first and agent-native.
+![shofar status](docs/status.png)
 
 ## Install
 
 ```sh
-brew install astaub/tap/shofar          # Homebrew (recommended)
-go install github.com/astaub/shofar@latest   # or via Go
-```
-
-Then ask the machine if it can take another worktree:
-
-```sh
-$ shofar capacity
-YES — headroom for at least one more worktree at the current per-worktree budget
-  pressure:        normal
-  available:       8.5 GB
-  reserve:         3.0 GB
-  usable headroom: 5.5 GB
-  worktree budget: 1.5 GB (measured from 3 worktree(s))
-  room for:        3 more worktree(s)
-```
-
-Build from source instead:
-
-```sh
-go build -o shofar . && mv shofar /usr/local/bin/
+brew install astaub/tap/shofar            # Homebrew
+go install github.com/astaub/shofar@latest  # or via Go
 ```
 
 Requires macOS (uses `vm_stat`, `sysctl`, `ps`, `lsof`, `launchctl`).
 
-## Use it as a skill in any coding agent
-
-shofar ships an [Agent Skill](https://github.com/anthropics/skills) playbook
-(`skills/shofar/SKILL.md`) — the open format read by Claude Code, Codex,
-Cursor, Gemini CLI, Copilot, Goose, and ~30 other tools. The binary can install
-it into an agent's skills directory:
-
-```sh
-shofar skill install --agent claude   # -> ~/.claude/skills/shofar/SKILL.md
-shofar skill install --dir <path>      # any other agent's skills directory
-shofar skill print                     # write it wherever you need
-shofar skill path                      # show known per-agent locations
-```
-
-The skill teaches an agent to gate on `shofar capacity --json` before
-spawning a worktree and to propose `shofar clean` when memory is tight.
-
 ## Commands
 
-```
-shofar status   [--json]            Memory + worktree + cleanup overview
-shofar capacity [--json]            Can this machine take another worktree?
-shofar clean    [--kill] [--json]   Show (default) or kill safe stale procs
-shofar cleanup  on|off|status       Toggle the scheduled auto-cleanup agent
-shofar skill    print|path|install  Install the Agent Skill into a coding agent
-```
+| Command | What it does |
+|---------|--------------|
+| `shofar status`  | Memory chart, what's using RAM (apps + agents-by-worktree), what to reclaim |
+| `shofar capacity`| Can this machine take another worktree? (the agent gate) |
+| `shofar clean`   | Show — or `--kill` — safe-to-kill stale dev processes |
+| `shofar chrome`  | Per-tab memory via Chrome DevTools |
+| `shofar cleanup` | `on`\|`off`\|`status` an hourly auto-clean LaunchAgent |
+| `shofar update`  | Rebuild + reinstall from source (`--check` for staleness) |
+| `shofar skill`   | Install the Agent Skill into a coding agent |
 
-Every read command supports `--json` for agent use. `clean` defaults to a dry
-run; nothing is killed without `--kill`.
+Every read command takes `--json`. `clean` is a dry run unless you pass `--kill`.
 
-### `capacity` — the agent gate
-
-```sh
-shofar capacity --json
-```
-```json
-{
-  "ok": true,
-  "pressure": "normal",
-  "available_bytes": 9171697664,
-  "reserve_bytes": 3221225472,
-  "usable_headroom_bytes": 5950472192,
-  "per_worktree_budget_bytes": 1572864000,
-  "budget_source": "measured",
-  "room_for_n": 3,
-  "reason": "headroom for at least one more worktree at the current per-worktree budget"
-}
-```
-
-An agent can check `ok` before spawning another worktree. The verdict combines:
-
-- **VM pressure** (`kern.memorystatus_vm_pressure_level`) as a hard gate —
-  anything but `normal` returns `ok: false`.
-- **Usable headroom** = available memory − a reserve held for the OS.
-- **Per-worktree budget** — *measured* from the average footprint of worktrees
-  that currently have processes, or a configured default when there is nothing
-  to measure.
-
-`room_for_n = usable_headroom / per_worktree_budget`.
-
-## Cleanup safety
-
-`clean` is conservative by design — the cost of killing live work far exceeds a
-missed stale process. It **never**:
-
-- kills a process in its own ancestor chain (so running it from inside a Claude
-  session can't kill that session);
-- kills a process attributed to an **active** worktree (running dev server or
-  recent edits);
-- kills a session younger than `min_session_minutes`;
-- kills anything matching a `protect_patterns` entry.
-
-Agent CLIs (claude/codex) are eligible only when their controlling TTY has been
-idle past the window, or when truly orphaned — no TTY *and* reparented to
-launchd (PPID 1) after their parent exited. A live no-TTY agent (e.g. an
-editor-spawned session) keeps its real parent, so it's protected. cursor-agent
-is eligible by runtime; dev servers and test runners only when attributed to a
-known but inactive worktree.
-
-## Scheduled cleanup
+## The agent gate: `capacity`
 
 ```sh
-shofar cleanup on      # install a LaunchAgent: `shofar clean --kill` hourly + at login
-shofar cleanup off     # remove it
-shofar cleanup status  # is it on, and does launchd agree?
+$ shofar capacity --json
+{ "ok": true, "pressure": "normal", "room_for_n": 3,
+  "per_worktree_budget_bytes": 1572864000, "budget_source": "measured",
+  "reason": "headroom for at least one more worktree …" }
 ```
 
-## Config
+An agent checks `ok` before spawning a worktree. The verdict = VM pressure (a
+hard gate) + usable headroom (available − an OS reserve) ÷ a per-worktree budget
+(*measured* from your live worktrees, or a default). `room_for_n` is how many
+more fit.
 
-`~/.config/shofar/config.json` (all fields optional; defaults shown):
+## Use it as an agent skill
+
+shofar ships an [Agent Skill](https://github.com/anthropics/skills)
+(`skills/shofar/SKILL.md`) — the open format read by Claude Code, Codex, Cursor,
+Gemini CLI, Goose, and ~30 other tools. Install it into an agent:
+
+```sh
+shofar skill install --agent claude   # → ~/.claude/skills/shofar/SKILL.md
+shofar skill install --dir <path>     # any other agent's skills dir
+```
+
+The skill teaches an agent to gate on `shofar capacity --json` before spawning a
+worktree, and to propose `shofar clean` when memory is tight.
+
+## Cleanup is conservative by design
+
+The cost of killing live work far exceeds a missed stale process, so `clean`
+**never** kills: a process in its own ancestor chain, anything in an **active**
+worktree (recent edits / running dev server), a session younger than the min
+age, or a `protect_patterns` match. It kills the whole process subtree (so the
+reported reclaim is real) and only after proving *no descendant* is protected.
+
+Agent CLIs are eligible only when truly idle/orphaned — and a TTY-less,
+recently-active worktree (how emdash/cursor run agents) is treated as **live**,
+never killed.
+
+## Config — `~/.config/shofar/config.json`
+
+All fields optional. Worktrees are discovered recursively under each base
+(nested `base/<project>/<branch>` layouts included):
 
 ```json
 {
-  "worktree_bases": ["~/code/worktrees"],
-  "active_subdirs": ["app", "config", "src", "lib", "apps", "packages"],
-  "active_minutes": 1440,
+  "worktree_bases": ["~/code/worktrees", "~/emdash/worktrees", "~/.cursor/worktrees"],
   "claude_idle_hours": 6,
   "min_session_minutes": 30,
-  "stale_agent_minutes": 120,
   "reserve_bytes": 3221225472,
-  "default_worktree_budget_bytes": 1572864000,
   "protect_patterns": [],
   "cleanup_enabled": false
 }
@@ -152,22 +92,15 @@ shofar cleanup status  # is it on, and does launchd agree?
 
 ## Development
 
-No hosted CI — checks run locally via a pre-push git hook (zero cost). Activate
-it once per clone:
+Checks run locally via a pre-push git hook (no hosted CI cost for releases):
 
 ```sh
-git config core.hooksPath .githooks   # runs go vet + build + test before each push
+git config core.hooksPath .githooks   # go vet + build + test before each push
 ```
 
-Cut a release locally (no CI needed): `goreleaser release --clean` on a `vX.Y.Z`
-tag, or `goreleaser build --snapshot --clean` for unsigned local binaries.
-
-## Status
-
-v0.1.0. Known follow-ups: nested worktree layouts (e.g.
-`base/<repo>/<branch>`) are not yet discovered — only flat
-`base/<worktree>` layouts; merged-worktree directory pruning is not yet ported.
+CI runs tests on PRs; releases are cut locally with `goreleaser release --clean`
+on a `vX.Y.Z` tag (see [CONTRIBUTING.md](CONTRIBUTING.md)).
 
 ## License
 
-MIT
+MIT © Andrew Staub
