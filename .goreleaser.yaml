@@ -32,19 +32,19 @@ release:
     owner: astaub
     name: shofar
 
-# Homebrew tap publishing — opt-in. To enable:
-#   1. Create the repo astaub/homebrew-tap
-#   2. Add a HOMEBREW_TAP_TOKEN repo secret (a PAT with `contents:write` on the tap)
-#   3. Uncomment this block and the matching env line in .github/workflows/release.yml
-#   4. After the next release: `brew install astaub/tap/shofar`
-# brews:
-#   - name: shofar
-#     repository:
-#       owner: astaub
-#       name: homebrew-tap
-#       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-#     homepage: "https://github.com/astaub/shofar"
-#     description: "macOS RAM guard for dev-worktree workflows"
-#     license: "MIT"
-#     install: |
-#       bin.install "shofar"
+# Homebrew tap publishing. The tap repo astaub/homebrew-tap must exist, and a
+# HOMEBREW_TAP_TOKEN (a PAT with `contents:write` on the tap) must be available
+# when goreleaser runs — as a GitHub repo secret for CI releases, or exported in
+# the shell for a local `goreleaser release --clean`. After the next release:
+# `brew install astaub/tap/shofar`.
+brews:
+  - name: shofar
+    repository:
+      owner: astaub
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: "https://github.com/astaub/shofar"
+    description: "macOS RAM guard for dev-worktree workflows"
+    license: "MIT"
+    install: |
+      bin.install "shofar"

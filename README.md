@@ -1,6 +1,6 @@
 # shofar
 
-<!-- TODO(andrew): headline + positioning in your voice. Stub below is mechanics only. -->
+**Take back your RAM**
 
 A macOS RAM guard for dev-worktree workflows. Unlike display-only monitors
 (htop, btop, glances), shofar **acts**: it tells agents whether the machine
@@ -19,8 +19,26 @@ one." shofar fills that gap, macOS-first and agent-native.
 ## Install
 
 ```sh
-go install github.com/astaub/shofar@latest   # once published
-# or build from source:
+brew install astaub/tap/shofar          # Homebrew (recommended)
+go install github.com/astaub/shofar@latest   # or via Go
+```
+
+Then ask the machine if it can take another worktree:
+
+```sh
+$ shofar capacity
+YES — headroom for at least one more worktree at the current per-worktree budget
+  pressure:        normal
+  available:       8.5 GB
+  reserve:         3.0 GB
+  usable headroom: 5.5 GB
+  worktree budget: 1.5 GB (measured from 3 worktree(s))
+  room for:        3 more worktree(s)
+```
+
+Build from source instead:
+
+```sh
 go build -o shofar . && mv shofar /usr/local/bin/
 ```
 
