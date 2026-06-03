@@ -130,6 +130,28 @@ func (s *Snapshot) SubtreeRSS(pid int) uint64 {
 	return total
 }
 
+// Subtree returns pid and all of its descendant procs — the exact set a subtree
+// kill terminates, and the set safety checks must clear before that kill.
+func (s *Snapshot) Subtree(pid int) []*Proc {
+	var out []*Proc
+	seen := map[int]bool{}
+	var walk func(int)
+	walk = func(id int) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		if p, ok := s.byPID[id]; ok {
+			out = append(out, p)
+		}
+		for _, c := range s.children[id] {
+			walk(c.PID)
+		}
+	}
+	walk(pid)
+	return out
+}
+
 // SubtreeMinTTYIdle returns the shortest TTY idle time across pid and all of its
 // descendants, and whether any process in the subtree has a usable TTY at all.
 //

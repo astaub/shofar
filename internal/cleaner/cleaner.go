@@ -28,10 +28,14 @@ import (
 type Candidate struct {
 	Proc   *proc.Proc `json:"proc"`
 	Reason string     `json:"reason"`
-	// ReclaimBytes is the memory a kill actually frees: the process plus every
-	// descendant that dies with it. For an orphaned launcher this is far larger
-	// than the launcher's own RSS — it's the child agent it spawned.
+	// ReclaimBytes is the memory a kill actually frees: the root plus every
+	// descendant Kill signals. For an orphaned launcher this is far larger than
+	// the launcher's own RSS — it's the child agent it spawned.
 	ReclaimBytes uint64 `json:"reclaim_bytes"`
+	// Subtree is the root and all descendants Kill will terminate. SIGTERM to the
+	// root alone does not take its children, so we signal the whole tree — and
+	// only after proving none of it is protected.
+	Subtree []*proc.Proc `json:"-"`
 }
 
 // Select returns the cleanup candidates for the current scan. It mutates
@@ -50,9 +54,32 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 	claudeIdle := time.Duration(cfg.ClaudeIdleHours) * time.Hour
 	staleAgent := time.Duration(cfg.StaleAgentMinutes) * time.Minute
 
+	// subtreeSafe is the kill-time guard: because Kill terminates the whole
+	// subtree, EVERY descendant — not just the root — must clear the exclusions.
+	// Otherwise a launcher outside any active worktree could drag a live,
+	// protected child down with it.
+	subtreeSafe := func(subtree []*proc.Proc) bool {
+		for _, m := range subtree {
+			if snap.IsSelfAncestor(m.PID) ||
+				(m.WorktreePath != "" && activeWorktrees[m.WorktreePath]) ||
+				matchesProtect(m.Command, cfg.ProtectPatterns) {
+				return false
+			}
+		}
+		return true
+	}
+
 	var out []Candidate
 	add := func(p *proc.Proc, reason string) {
-		out = append(out, Candidate{Proc: p, Reason: reason, ReclaimBytes: snap.SubtreeRSS(p.PID)})
+		subtree := snap.Subtree(p.PID)
+		if !subtreeSafe(subtree) {
+			return
+		}
+		var rss uint64
+		for _, m := range subtree {
+			rss += m.RSSBytes
+		}
+		out = append(out, Candidate{Proc: p, Reason: reason, ReclaimBytes: rss, Subtree: subtree})
 	}
 	for _, p := range snap.Procs {
 		// Hard exclusions first.
@@ -112,7 +139,26 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 			}
 		}
 	}
-	return out
+
+	// Drop any candidate that already lives inside another candidate's subtree
+	// (e.g. a dev-server worker under its parent, or a nested agent through a
+	// non-agent middle process). Without this the tree would be reclaim-counted
+	// twice and signaled twice. The outermost root represents the whole tree.
+	owned := map[int]bool{}
+	for _, c := range out {
+		for _, m := range c.Subtree {
+			if m.PID != c.Proc.PID {
+				owned[m.PID] = true
+			}
+		}
+	}
+	deduped := out[:0]
+	for _, c := range out {
+		if !owned[c.Proc.PID] {
+			deduped = append(deduped, c)
+		}
+	}
+	return deduped
 }
 
 // Kill sends SIGTERM to each candidate. Returns the PIDs successfully signaled,
@@ -124,21 +170,35 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 // and had its PID recycled to an unrelated process, which we must not signal.
 func Kill(cands []Candidate) (killed, skipped []int, errs map[int]error) {
 	errs = map[int]error{}
+	signaled := map[int]bool{}
 	for _, c := range cands {
-		if !proc.Verify(c.Proc) {
-			skipped = append(skipped, c.Proc.PID)
-			continue
+		// Signal the whole subtree (descendants first) so the reclaim we reported
+		// is real — SIGTERM to the root alone leaves its children running.
+		subtree := c.Subtree
+		if len(subtree) == 0 {
+			subtree = []*proc.Proc{c.Proc}
 		}
-		p, err := os.FindProcess(c.Proc.PID)
-		if err != nil {
-			errs[c.Proc.PID] = err
-			continue
+		for i := len(subtree) - 1; i >= 0; i-- {
+			pr := subtree[i]
+			if signaled[pr.PID] {
+				continue // shared with an overlapping subtree; signal once
+			}
+			signaled[pr.PID] = true
+			if !proc.Verify(pr) {
+				skipped = append(skipped, pr.PID)
+				continue
+			}
+			osp, err := os.FindProcess(pr.PID)
+			if err != nil {
+				errs[pr.PID] = err
+				continue
+			}
+			if err := osp.Signal(syscall.SIGTERM); err != nil {
+				errs[pr.PID] = err
+				continue
+			}
+			killed = append(killed, pr.PID)
 		}
-		if err := p.Signal(syscall.SIGTERM); err != nil {
-			errs[c.Proc.PID] = err
-			continue
-		}
-		killed = append(killed, c.Proc.PID)
 	}
 	return killed, skipped, errs
 }

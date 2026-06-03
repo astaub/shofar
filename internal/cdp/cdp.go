@@ -19,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,7 +61,7 @@ func Tabs(host string, port int) ([]Tab, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
 		return nil, err
 	}
-	var tabs []Tab
+	var pages []targetEntry
 	for _, e := range entries {
 		if e.Type != "page" || e.WebSocketDebuggerURL == "" {
 			continue
@@ -68,9 +69,25 @@ func Tabs(host string, port int) ([]Tab, error) {
 		if strings.HasPrefix(e.URL, "devtools://") || strings.HasPrefix(e.URL, "chrome-extension://") {
 			continue
 		}
-		heap, _ := jsHeap(e.WebSocketDebuggerURL) // best-effort; 0 on failure
-		tabs = append(tabs, Tab{Title: e.Title, URL: e.URL, JSHeapBytes: heap})
+		pages = append(pages, e)
 	}
+
+	// Measure JS heap concurrently (bounded) so one slow/wedged tab can't
+	// serialize the whole command — each is still capped by the WS deadline.
+	tabs := make([]Tab, len(pages))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, e := range pages {
+		wg.Add(1)
+		go func(i int, e targetEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			heap, _ := jsHeap(e.WebSocketDebuggerURL) // best-effort; 0 on failure
+			tabs[i] = Tab{Title: e.Title, URL: e.URL, JSHeapBytes: heap}
+		}(i, e)
+	}
+	wg.Wait()
 	return tabs, nil
 }
 
@@ -196,11 +213,14 @@ func (w *wsConn) send(text string) error {
 }
 
 func (w *wsConn) recv() ([]byte, error) {
+	const maxFrame = 16 << 20 // reject absurd/hostile frame lengths (OOM guard)
+	var msg []byte
 	for {
 		h := make([]byte, 2)
 		if _, err := io.ReadFull(w.r, h); err != nil {
 			return nil, err
 		}
+		fin := h[0]&0x80 != 0
 		opcode := h[0] & 0x0f
 		ln := int(h[1] & 0x7f)
 		switch ln {
@@ -215,23 +235,40 @@ func (w *wsConn) recv() ([]byte, error) {
 			if _, err := io.ReadFull(w.r, ext); err != nil {
 				return nil, err
 			}
-			ln = int(binary.BigEndian.Uint64(ext))
+			n := binary.BigEndian.Uint64(ext)
+			if n > maxFrame {
+				return nil, fmt.Errorf("cdp frame too large: %d", n)
+			}
+			ln = int(n)
 		}
-		if h[1]&0x80 != 0 { // server frames shouldn't be masked, but handle it
-			mk := make([]byte, 4)
-			io.ReadFull(w.r, mk)
+		if ln > maxFrame || len(msg)+ln > maxFrame {
+			return nil, fmt.Errorf("cdp message too large")
+		}
+		var mask []byte
+		if h[1]&0x80 != 0 { // server frames shouldn't be masked, but unmask if so
+			mask = make([]byte, 4)
+			if _, err := io.ReadFull(w.r, mask); err != nil {
+				return nil, err
+			}
 		}
 		payload := make([]byte, ln)
 		if _, err := io.ReadFull(w.r, payload); err != nil {
 			return nil, err
 		}
+		if mask != nil {
+			for i := range payload {
+				payload[i] ^= mask[i%4]
+			}
+		}
 		switch opcode {
-		case 0x1, 0x2: // text / binary
-			return payload, nil
+		case 0x0, 0x1, 0x2: // continuation / text / binary — accumulate to FIN
+			msg = append(msg, payload...)
+			if fin {
+				return msg, nil
+			}
 		case 0x8: // close
 			return nil, io.EOF
-		default: // ping/pong/continuation — keep reading
-			continue
+			// ping/pong (0x9/0xA) and reserved: skip, keep reading
 		}
 	}
 }

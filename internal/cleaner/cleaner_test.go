@@ -76,6 +76,44 @@ func TestSelect_OrphanReclaimsChildSubtree(t *testing.T) {
 	}
 }
 
+func TestSelect_ProtectedDescendantBlocksKill(t *testing.T) {
+	// Orphan launcher (root: no TTY, reparented) whose child is a live session in
+	// an ACTIVE worktree. Because Kill signals the whole subtree, selecting the
+	// launcher would kill protected work — so it must NOT be a candidate.
+	const mb = 1 << 20
+	procs := []*proc.Proc{
+		{PID: 100, PPID: 1, Kind: proc.KindClaude, TTY: "", Elapsed: time.Hour, RSSBytes: 4 * mb},
+		{PID: 101, PPID: 100, Kind: proc.KindClaude, TTY: "", Elapsed: time.Hour, RSSBytes: 700 * mb, WorktreePath: "/wt/active"},
+	}
+	snap := proc.NewSnapshot(procs, 99999)
+	cands := Select(cfg(), snap, inv(map[string]bool{"active": true}), time.Now())
+	if hasPID(cands, 100) {
+		t.Error("launcher with a child in an active worktree must NOT be selected — kill would take the live child")
+	}
+}
+
+func TestSelect_NestedDevServersDeduped(t *testing.T) {
+	// A dev-server parent and its worker child, both in the same inactive
+	// worktree. Only the root is emitted, and its reclaim is the whole subtree —
+	// not double-counted across both.
+	const mb = 1 << 20
+	procs := []*proc.Proc{
+		{PID: 200, PPID: 50, Kind: proc.KindDevServer, Elapsed: time.Hour, RSSBytes: 100 * mb, Worktree: "wt", WorktreePath: "/wt/wt"},
+		{PID: 201, PPID: 200, Kind: proc.KindDevServer, Elapsed: time.Hour, RSSBytes: 400 * mb, Worktree: "wt", WorktreePath: "/wt/wt"},
+	}
+	snap := proc.NewSnapshot(procs, 99999)
+	cands := Select(cfg(), snap, inv(map[string]bool{"wt": false}), time.Now())
+	if len(cands) != 1 {
+		t.Fatalf("expected 1 deduped candidate, got %d", len(cands))
+	}
+	if cands[0].Proc.PID != 200 {
+		t.Errorf("expected root pid 200, got %d", cands[0].Proc.PID)
+	}
+	if want := uint64(500 * mb); cands[0].ReclaimBytes != want {
+		t.Errorf("ReclaimBytes = %d MB, want %d MB (parent + worker, counted once)", cands[0].ReclaimBytes/mb, want/mb)
+	}
+}
+
 func TestSelect_LiveNoTTYAgentProtected(t *testing.T) {
 	// No TTY but a LIVE parent (e.g. an editor-spawned agent) => not orphaned,
 	// must be protected even though it has no controlling terminal.

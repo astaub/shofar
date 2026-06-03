@@ -97,10 +97,20 @@ func cmdStatus(args []string) error {
 	// thing at the end. (Output is a few KB — well under the pipe buffer — and a
 	// reader goroutine guards against blocking regardless.)
 	realStdout := os.Stdout
-	pr, pw, _ := os.Pipe()
+	pr, pw, perr := os.Pipe()
+	if perr != nil {
+		return fmt.Errorf("capture output: %w", perr)
+	}
 	os.Stdout = pw
 	rendered := make(chan string, 1)
 	go func() { data, _ := io.ReadAll(pr); rendered <- string(data) }()
+	// Restore stdout, close the pipe, and draw the box on EVERY exit path —
+	// including a panic mid-render — so the reader goroutine never leaks.
+	defer func() {
+		os.Stdout = realStdout
+		pw.Close()
+		fmt.Print(boxed(<-rendered))
+	}()
 
 	// ── Title ──────────────────────────────────────────────────────────────────
 	if !hasFlag(args, "--no-art") {
@@ -329,12 +339,7 @@ func cmdStatus(args []string) error {
 	} else {
 		fmt.Printf("Cleanup    %s  ·  nothing to kill\n", enabled)
 	}
-
-	// Close the capture and draw a box around the rendered view.
-	os.Stdout = realStdout
-	pw.Close()
-	fmt.Print(boxed(<-rendered))
-	return nil
+	return nil // the deferred restore draws the boxed output
 }
 
 // boxed wraps multi-line text in a rounded box sized to its widest line,
@@ -435,6 +440,9 @@ func padRight(s string, n int) string {
 // truncRunes shortens s to at most n runes, appending an ellipsis when cut, so
 // fixed-width table columns don't blow out on long app names.
 func truncRunes(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= n {
 		return s
 	}
