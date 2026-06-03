@@ -46,8 +46,16 @@ type Config struct {
 // Default returns the built-in configuration.
 func Default() Config {
 	return Config{
-		WorktreeBases:              []string{filepath.Join(home(), "code", "worktrees")},
-		ActiveSubdirs:              []string{"app", "config", "src", "lib", "apps", "packages"},
+		WorktreeBases: []string{
+			// Common roots for git worktrees and agent-harness trees. Discovery
+			// walks each recursively, so nested layouts (emdash/cursor) are found;
+			// non-existent roots are skipped. Add machine-specific roots via config.
+			filepath.Join(home(), "code", "worktrees"),
+			filepath.Join(home(), "emdash", "worktrees"),
+			filepath.Join(home(), ".cursor", "worktrees"),
+			filepath.Join(home(), "worktrees"),
+		},
+		ActiveSubdirs:              []string{"app", "config", "src", "lib", "apps", "packages", "cmd", "internal", "pkg"},
 		ActiveMinutes:              1440, // 24h
 		ClaudeIdleHours:            6,
 		MinSessionMinutes:          30,

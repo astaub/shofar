@@ -33,24 +33,52 @@ type Inventory struct {
 	Worktrees []*Worktree
 }
 
-// Build discovers worktrees, resolves the cwd of every candidate process so it
-// can be attributed to a worktree, and computes activity.
-func Build(cfg config.Config, snap *proc.Snapshot, now time.Time) *Inventory {
-	inv := &Inventory{}
-
-	for _, base := range cfg.WorktreeBases {
-		entries, err := os.ReadDir(base)
+// Discover finds git worktrees under each base to a bounded depth, so nested
+// layouts are seen — not just immediate children. Emdash nests as
+// <base>/<project>/<branch>, cursor as <base>/<owner>/<branch>; plain git
+// worktrees sit one level down. A directory IS a worktree when it contains a
+// `.git` entry (a linked worktree has a `.git` FILE pointing at the gitdir; a
+// clone has a `.git` DIR). Descent stops at a worktree and skips heavy/hidden
+// dirs. Non-existent bases are silently skipped.
+func Discover(bases []string) []*Worktree {
+	const maxDepth = 4
+	var out []*Worktree
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			continue
+			return
+		}
+		for _, e := range entries {
+			if e.Name() == ".git" {
+				out = append(out, &Worktree{Name: filepath.Base(dir), Path: dir})
+				return // a worktree's own subdirs are not separate worktrees
+			}
+		}
+		if depth >= maxDepth {
+			return
 		}
 		for _, e := range entries {
 			if !e.IsDir() {
+				continue // symlinks report !IsDir, which also avoids loops
+			}
+			n := e.Name()
+			if n == "node_modules" || n == "dist" || n == ".next" || strings.HasPrefix(n, ".") {
 				continue
 			}
-			wt := &Worktree{Name: e.Name(), Path: filepath.Join(base, e.Name())}
-			inv.Worktrees = append(inv.Worktrees, wt)
+			walk(filepath.Join(dir, n), depth+1)
 		}
 	}
+	for _, base := range bases {
+		walk(base, 0)
+	}
+	return out
+}
+
+// Build discovers worktrees, resolves the cwd of every candidate process so it
+// can be attributed to a worktree, and computes activity.
+func Build(cfg config.Config, snap *proc.Snapshot, now time.Time) *Inventory {
+	inv := &Inventory{Worktrees: Discover(cfg.WorktreeBases)}
 	if len(inv.Worktrees) == 0 {
 		return inv
 	}

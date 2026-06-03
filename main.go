@@ -45,6 +45,8 @@ func main() {
 		err = cmdClean(args)
 	case "chrome":
 		err = cmdChrome(args)
+	case "update":
+		err = cmdUpdate(args)
 	case "cleanup":
 		err = cmdCleanup(args)
 	case "skill":
@@ -72,6 +74,7 @@ Usage:
   shofar capacity [--json]            Can this machine take another worktree?
   shofar clean    [--kill] [--json]   Show (default) or kill safe stale procs
   shofar chrome   [--port N] [--json]  Per-tab memory via Chrome DevTools
+  shofar update   [--check]            Rebuild + reinstall from source
   shofar cleanup  on|off|status       Toggle the scheduled auto-cleanup agent
   shofar skill    print|path|install  Install the Agent Skill into a coding agent
   shofar version
