@@ -32,12 +32,13 @@ release:
     owner: astaub
     name: shofar
 
-# Homebrew tap publishing. The tap repo astaub/homebrew-tap must exist, and a
-# HOMEBREW_TAP_TOKEN (a PAT with `contents:write` on the tap) must be exported in
-# the shell when running `goreleaser release --clean`. Releases are cut locally
-# (no CI release workflow) so this token never lives in GitHub. After a release:
-# `brew install astaub/tap/shofar`. See CONTRIBUTING.md → Releasing.
-brews:
+# Homebrew tap publishing. goreleaser writes a Cask (the modern way to ship a
+# pre-compiled binary) into astaub/homebrew-tap. The HOMEBREW_TAP_TOKEN env var
+# (a token with write access to the tap) must be set when running
+# `goreleaser release --clean`. Releases are cut locally so the token never
+# lives in GitHub. Install stays: `brew install astaub/tap/shofar`.
+# See CONTRIBUTING.md → Releasing.
+homebrew_casks:
   - name: shofar
     repository:
       owner: astaub
@@ -45,6 +46,11 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     homepage: "https://github.com/astaub/shofar"
     description: "macOS RAM guard for dev-worktree workflows"
-    license: "MIT"
-    install: |
-      bin.install "shofar"
+    # Unsigned binary: strip the Gatekeeper quarantine xattr on install so the
+    # cask runs without a security prompt.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/shofar"]
+          end

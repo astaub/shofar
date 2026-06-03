@@ -35,9 +35,9 @@ HOMEBREW_TAP_TOKEN=<pat-with-contents:write-on-astaub/homebrew-tap> \
   goreleaser release --clean
 ```
 
-That builds the darwin binaries, cuts the GitHub release, and updates the
-`astaub/homebrew-tap` formula, after which `brew install astaub/tap/shofar`
-works. Install goreleaser once with `brew install goreleaser`.
+That builds the darwin binaries, cuts the GitHub release, and writes the cask to
+`astaub/homebrew-tap`, after which `brew install astaub/tap/shofar` works.
+Install goreleaser once with `brew install goreleaser`.
 
 ## Welcome PRs
 
