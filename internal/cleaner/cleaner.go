@@ -28,6 +28,10 @@ import (
 type Candidate struct {
 	Proc   *proc.Proc `json:"proc"`
 	Reason string     `json:"reason"`
+	// ReclaimBytes is the memory a kill actually frees: the process plus every
+	// descendant that dies with it. For an orphaned launcher this is far larger
+	// than the launcher's own RSS — it's the child agent it spawned.
+	ReclaimBytes uint64 `json:"reclaim_bytes"`
 }
 
 // Select returns the cleanup candidates for the current scan. It mutates
@@ -47,6 +51,9 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 	staleAgent := time.Duration(cfg.StaleAgentMinutes) * time.Minute
 
 	var out []Candidate
+	add := func(p *proc.Proc, reason string) {
+		out = append(out, Candidate{Proc: p, Reason: reason, ReclaimBytes: snap.SubtreeRSS(p.PID)})
+	}
 	for _, p := range snap.Procs {
 		// Hard exclusions first.
 		if snap.IsSelfAncestor(p.PID) {
@@ -70,26 +77,38 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 
 		switch p.Kind {
 		case proc.KindClaude, proc.KindCodex:
-			idle, hasTTY := proc.TTYIdle(p, now)
+			// Only judge the session ROOT. A claude/codex whose parent is itself
+			// a claude/codex is the inner process of one session (e.g. the child
+			// of a `tmux new-session -d ... claude` launcher); the root's subtree
+			// walk already accounts for it, so emitting it again would
+			// double-count the reclaim and risk a redundant kill.
+			if isChildOfSession(snap, p) {
+				continue
+			}
+			// Liveness is a property of the whole subtree, not this process's own
+			// TTY: a detached session's launcher has no TTY but its child does.
+			// Only abandoned when NOTHING in the tree has a recently-active
+			// terminal.
+			idle, hasTTY := snap.SubtreeMinTTYIdle(p.PID, now)
 			switch {
 			case hasTTY && idle >= claudeIdle:
-				out = append(out, Candidate{p, string(p.Kind) + " session idle " + round(idle)})
+				add(p, string(p.Kind)+" session idle "+round(idle))
 			case !hasTTY && isReparented(p):
-				// No controlling terminal AND reparented to launchd (PPID 1) =>
-				// the session's parent died, so it's a true orphan. A live
-				// no-TTY agent (e.g. an editor- or IDE-spawned session) still
-				// has its real parent, so PPID != 1 and we leave it alone.
-				out = append(out, Candidate{p, "orphaned " + string(p.Kind) + " session (no TTY, reparented to launchd)"})
+				// No TTY anywhere in the tree AND reparented to launchd (PPID 1)
+				// => the session's parent died and no terminal is attached, so
+				// it's a true orphan. A live no-TTY agent (editor/IDE-spawned)
+				// still has its real parent (PPID != 1) and is left alone.
+				add(p, "orphaned "+string(p.Kind)+" session (no TTY in tree, reparented to launchd)")
 			}
 		case proc.KindCursorAgent:
 			if p.Elapsed >= staleAgent {
-				out = append(out, Candidate{p, "stale cursor-agent running " + round(p.Elapsed)})
+				add(p, "stale cursor-agent running "+round(p.Elapsed))
 			}
 		case proc.KindDevServer, proc.KindTestRunner:
 			// Only eligible when attributed to a known but inactive worktree:
 			// an unattributed dev server may be the user's primary one.
 			if p.Worktree != "" {
-				out = append(out, Candidate{p, string(p.Kind) + " in inactive worktree " + p.Worktree})
+				add(p, string(p.Kind)+" in inactive worktree "+p.Worktree)
 			}
 		}
 	}
@@ -127,6 +146,17 @@ func Kill(cands []Candidate) (killed, skipped []int, errs map[int]error) {
 // isReparented reports whether a process has been reparented to launchd (PID 1),
 // the macOS signal that its original parent has exited.
 func isReparented(p *proc.Proc) bool { return p.PPID == 1 }
+
+// isChildOfSession reports whether p's parent is itself an agent process of the
+// same kind family — i.e. p is the inner process of a single session, not its
+// root. We classify a session by its root so a launcher + its child count once.
+func isChildOfSession(snap *proc.Snapshot, p *proc.Proc) bool {
+	parent, ok := snap.LookupPID(p.PPID)
+	if !ok {
+		return false
+	}
+	return parent.Kind == proc.KindClaude || parent.Kind == proc.KindCodex
+}
 
 func matchesProtect(command string, patterns []string) bool {
 	for _, pat := range patterns {

@@ -5,6 +5,50 @@ import (
 	"time"
 )
 
+// TestSubtreeMinTTYIdle covers the detached-session liveness logic with an
+// injected TTY-idle function (no real /dev access). The @architect bug: a
+// reparented no-TTY launcher whose child holds a LIVE TTY must read as live.
+func TestSubtreeMinTTYIdle(t *testing.T) {
+	const mb = 1 << 20
+	// launcher: reparented, no TTY of its own. child: the real session.
+	launcher := &Proc{PID: 100, PPID: 1, Kind: KindClaude, TTY: "??", RSSBytes: 4 * mb}
+	child := &Proc{PID: 101, PPID: 100, Kind: KindClaude, TTY: "ttys9", RSSBytes: 741 * mb}
+	snap := NewSnapshot([]*Proc{launcher, child}, 99999)
+
+	now := time.Unix(1_000_000, 0)
+	orig := ttyIdle
+	defer func() { ttyIdle = orig }()
+
+	// Case 1 — child TTY active 2m ago: the whole session is LIVE even though
+	// the launcher has no TTY. hasTTY must be true and idle small.
+	ttyIdle = func(p *Proc, _ time.Time) (time.Duration, bool) {
+		if p.PID == 101 {
+			return 2 * time.Minute, true
+		}
+		return 0, false // launcher: no usable TTY
+	}
+	if idle, hasTTY := snap.SubtreeMinTTYIdle(100, now); !hasTTY || idle != 2*time.Minute {
+		t.Errorf("live child: got (idle=%v, hasTTY=%v), want (2m, true)", idle, hasTTY)
+	}
+
+	// Case 2 — nothing in the tree has a TTY: a true orphan signal.
+	ttyIdle = func(_ *Proc, _ time.Time) (time.Duration, bool) { return 0, false }
+	if _, hasTTY := snap.SubtreeMinTTYIdle(100, now); hasTTY {
+		t.Error("no-TTY tree: hasTTY should be false")
+	}
+
+	// Case 3 — child TTY idle 25h: session is abandoned-idle, min idle reported.
+	ttyIdle = func(p *Proc, _ time.Time) (time.Duration, bool) {
+		if p.PID == 101 {
+			return 25 * time.Hour, true
+		}
+		return 0, false
+	}
+	if idle, hasTTY := snap.SubtreeMinTTYIdle(100, now); !hasTTY || idle != 25*time.Hour {
+		t.Errorf("idle child: got (idle=%v, hasTTY=%v), want (25h, true)", idle, hasTTY)
+	}
+}
+
 func TestParseEtime(t *testing.T) {
 	cases := map[string]time.Duration{
 		"05:30":      5*time.Minute + 30*time.Second,

@@ -51,7 +51,7 @@ func cmdClean(args []string) error {
 
 	var reclaim uint64
 	for _, c := range cands {
-		reclaim += c.Proc.RSSBytes
+		reclaim += c.ReclaimBytes
 	}
 	verb := "Would kill"
 	if doKill {
@@ -63,8 +63,15 @@ func cmdClean(args []string) error {
 		if wt == "" {
 			wt = "-"
 		}
-		fmt.Printf("  pid %-7d %-12s %8s  %-22s  %s\n",
-			c.Proc.PID, c.Proc.Kind, fmtBytes(c.Proc.RSSBytes), wt, c.Reason)
+		// Show subtree reclaim; append the bare process RSS in parens when the
+		// child tree holds materially more than the named process (e.g. a tiny
+		// orphan launcher whose agent child holds the real memory).
+		size := fmtBytes(c.ReclaimBytes)
+		if c.ReclaimBytes >= c.Proc.RSSBytes*2 && c.ReclaimBytes-c.Proc.RSSBytes > 50<<20 {
+			size = fmt.Sprintf("%s (proc %s + subtree)", fmtBytes(c.ReclaimBytes), fmtBytes(c.Proc.RSSBytes))
+		}
+		fmt.Printf("  pid %-7d %-12s %-26s  %-22s  %s\n",
+			c.Proc.PID, c.Proc.Kind, size, wt, c.Reason)
 	}
 
 	if !doKill {

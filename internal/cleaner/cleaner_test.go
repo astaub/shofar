@@ -47,6 +47,35 @@ func TestSelect_OrphanedAgentSelected(t *testing.T) {
 	}
 }
 
+func TestSelect_OrphanReclaimsChildSubtree(t *testing.T) {
+	// An ABANDONED detached session: launcher reparented to launchd, and nothing
+	// in the tree has a TTY (both no-TTY). It must be flagged exactly once (at the
+	// root, not the child too), and its ReclaimBytes must reflect the whole
+	// subtree — the 4 MB launcher + its 741 MB child — not just the launcher.
+	const mb = 1 << 20
+	procs := []*proc.Proc{
+		{PID: 100, PPID: 1, Kind: proc.KindClaude, TTY: "", Elapsed: time.Hour, RSSBytes: 4 * mb},     // launcher (orphan root)
+		{PID: 101, PPID: 100, Kind: proc.KindClaude, TTY: "", Elapsed: time.Hour, RSSBytes: 741 * mb}, // child (same session)
+	}
+	snap := proc.NewSnapshot(procs, 99999)
+	cands := Select(cfg(), snap, inv(nil), time.Now())
+
+	var roots []Candidate
+	for _, c := range cands {
+		roots = append(roots, c)
+	}
+	if len(roots) != 1 {
+		t.Fatalf("expected exactly 1 candidate (the session root), got %d: %+v", len(roots), roots)
+	}
+	got := roots[0]
+	if got.Proc.PID != 100 {
+		t.Errorf("candidate should be the root launcher pid 100, got pid %d", got.Proc.PID)
+	}
+	if want := uint64(745 * mb); got.ReclaimBytes != want {
+		t.Errorf("ReclaimBytes = %d MB, want %d MB (launcher + child subtree)", got.ReclaimBytes/mb, want/mb)
+	}
+}
+
 func TestSelect_LiveNoTTYAgentProtected(t *testing.T) {
 	// No TTY but a LIVE parent (e.g. an editor-spawned agent) => not orphaned,
 	// must be protected even though it has no controlling terminal.

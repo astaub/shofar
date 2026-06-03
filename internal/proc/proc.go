@@ -58,6 +58,7 @@ type Proc struct {
 type Snapshot struct {
 	Procs     []*Proc
 	byPID     map[int]*Proc
+	children  map[int][]*Proc
 	ancestors map[int]bool
 }
 
@@ -86,12 +87,85 @@ func Scan() (*Snapshot, error) {
 // ancestor chain should be protected. Exposed so callers (and tests) can
 // compose snapshots without shelling out to ps.
 func NewSnapshot(procs []*Proc, selfPID int) *Snapshot {
-	s := &Snapshot{Procs: procs, byPID: make(map[int]*Proc, len(procs))}
+	s := &Snapshot{
+		Procs:    procs,
+		byPID:    make(map[int]*Proc, len(procs)),
+		children: make(map[int][]*Proc, len(procs)),
+	}
 	for _, p := range procs {
 		s.byPID[p.PID] = p
 	}
+	for _, p := range procs {
+		if p.PPID != p.PID { // defensive: never index a process as its own child
+			s.children[p.PPID] = append(s.children[p.PPID], p)
+		}
+	}
 	s.ancestors = computeAncestors(selfPID, s.byPID)
 	return s
+}
+
+// SubtreeRSS returns the combined resident memory of pid and all of its
+// descendants. Killing a process tears down its children too (a tmux server
+// takes its panes, a launcher takes the agent it spawned), so the memory a
+// kill actually reclaims is the whole subtree — not just the named process.
+// This is why an orphaned 4 MB launcher can be worth killing: its child holds
+// the real RAM.
+func (s *Snapshot) SubtreeRSS(pid int) uint64 {
+	var total uint64
+	seen := map[int]bool{}
+	var walk func(int)
+	walk = func(id int) {
+		if seen[id] {
+			return // guard against PPID cycles
+		}
+		seen[id] = true
+		if p, ok := s.byPID[id]; ok {
+			total += p.RSSBytes
+		}
+		for _, c := range s.children[id] {
+			walk(c.PID)
+		}
+	}
+	walk(pid)
+	return total
+}
+
+// SubtreeMinTTYIdle returns the shortest TTY idle time across pid and all of its
+// descendants, and whether any process in the subtree has a usable TTY at all.
+//
+// This is the liveness test for a detached session. A `tmux new-session -d ...
+// claude` launcher is reparented to launchd with no TTY of its own — by itself
+// it looks exactly like an abandoned orphan. But its child claude holds the
+// real interactive TTY. By taking the minimum idle across the whole tree we ask
+// the right question: "has ANYONE in this session touched a terminal recently?"
+// hasTTY=false means nothing in the tree has a terminal — only then is a
+// reparented session a true orphan.
+func (s *Snapshot) SubtreeMinTTYIdle(pid int, now time.Time) (idle time.Duration, hasTTY bool) {
+	min := time.Duration(-1)
+	seen := map[int]bool{}
+	var walk func(int)
+	walk = func(id int) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		if p, ok := s.byPID[id]; ok {
+			if d, ok2 := ttyIdle(p, now); ok2 {
+				hasTTY = true
+				if min < 0 || d < min {
+					min = d
+				}
+			}
+		}
+		for _, c := range s.children[id] {
+			walk(c.PID)
+		}
+	}
+	walk(pid)
+	if !hasTTY {
+		return 0, false
+	}
+	return min, true
 }
 
 // parsePSLine parses one line of `ps -o pid=,ppid=,rss=,etime=,tty=,command=`.
@@ -303,6 +377,11 @@ func Verify(p *Proc) bool {
 	// when we scanned it (a reused PID would be younger).
 	return command == p.Command && nowElapsed+time.Second >= p.Elapsed
 }
+
+// ttyIdle is the TTY-idle lookup used by SubtreeMinTTYIdle. It indirects through
+// a package var so tests can inject deterministic idle values without touching
+// real /dev devices.
+var ttyIdle = TTYIdle
 
 // TTYIdle returns how long the process's controlling TTY has been idle (no
 // keystroke or program output), or ok=false if it has no usable TTY. The TTY
