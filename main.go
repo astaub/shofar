@@ -43,6 +43,8 @@ func main() {
 		err = cmdCapacity(args)
 	case "clean":
 		err = cmdClean(args)
+	case "chrome":
+		err = cmdChrome(args)
 	case "cleanup":
 		err = cmdCleanup(args)
 	case "skill":
@@ -63,12 +65,13 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `shofar — macOS RAM guard for dev-worktree workflows
+	fmt.Fprint(os.Stderr, `shofar 🐏 — macOS RAM guard for dev-worktree workflows
 
 Usage:
   shofar status   [--json]            Memory + worktree + cleanup overview
   shofar capacity [--json]            Can this machine take another worktree?
   shofar clean    [--kill] [--json]   Show (default) or kill safe stale procs
+  shofar chrome   [--port N] [--json]  Per-tab memory via Chrome DevTools
   shofar cleanup  on|off|status       Toggle the scheduled auto-cleanup agent
   shofar skill    print|path|install  Install the Agent Skill into a coding agent
   shofar version
