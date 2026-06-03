@@ -65,6 +65,13 @@ func Select(cfg config.Config, snap *proc.Snapshot, inv *worktree.Inventory, now
 				matchesProtect(m.Command, cfg.ProtectPatterns) {
 				return false
 			}
+			// Recent file edits in a process's cwd mean live work — even with no
+			// TTY (emdash/cursor run agents terminal-less) and even when shofar
+			// can't yet attribute the cwd to a discovered worktree. This is what
+			// stops `clean` from ever proposing to kill a live, busy agent.
+			if worktree.CwdRecentlyActive(m.Cwd, cfg, now) {
+				return false
+			}
 		}
 		return true
 	}

@@ -1,6 +1,8 @@
 package cleaner
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -73,6 +75,30 @@ func TestSelect_OrphanReclaimsChildSubtree(t *testing.T) {
 	}
 	if want := uint64(745 * mb); got.ReclaimBytes != want {
 		t.Errorf("ReclaimBytes = %d MB, want %d MB (launcher + child subtree)", got.ReclaimBytes/mb, want/mb)
+	}
+}
+
+func TestSelect_RecentEditsProtectLiveTTYlessAgent(t *testing.T) {
+	// shofar #4: emdash/cursor run agents with NO TTY, and a live one can reparent
+	// to launchd — looking exactly like an orphan. Recent edits in its worktree
+	// must mark it live so `clean` never proposes killing it.
+	const mb = 1 << 20
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "app"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app", "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	} // mtime ~= now, well inside ActiveMinutes
+	procs := []*proc.Proc{
+		{PID: 100, PPID: 1, Kind: proc.KindClaude, TTY: "", Elapsed: time.Hour, RSSBytes: 500 * mb, Cwd: dir},
+	}
+	snap := proc.NewSnapshot(procs, 99999)
+	c := cfg()
+	c.ActiveSubdirs = []string{"app"}
+	c.ActiveMinutes = 1440
+	if cands := Select(c, snap, inv(nil), time.Now()); hasPID(cands, 100) {
+		t.Error("a no-TTY reparented agent with recent worktree edits must NOT be a kill candidate (shofar #4)")
 	}
 }
 

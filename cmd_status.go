@@ -57,7 +57,7 @@ func cmdStatus(args []string) error {
 	cands := cleaner.Select(s.cfg, s.snap, s.inv, s.now)
 	consumers, allProcRSS, agentChildren := buildConsumers(s.snap)
 	chrome := chromeBreakdown(s.snap)
-	orphans := detectOrphanedSessions(s.snap, s.now)
+	orphans := detectOrphanedSessions(s.snap, s.cfg, s.now)
 	recs := buildRecommendations(s, consumers, cands)
 
 	// Per-tab Chrome memory, but only when a debug Chrome is exposing DevTools.
@@ -783,7 +783,7 @@ type orphanedSession struct {
 // sessions where nothing in the tree has touched a terminal recently are
 // surfaced — so this list stays consistent with what `shofar clean` would act
 // on, instead of crying wolf on every no-TTY Emdash session.
-func detectOrphanedSessions(snap *proc.Snapshot, now time.Time) []orphanedSession {
+func detectOrphanedSessions(snap *proc.Snapshot, cfg config.Config, now time.Time) []orphanedSession {
 	const idleThresh = 1 * time.Hour
 
 	var result []orphanedSession
@@ -795,6 +795,12 @@ func detectOrphanedSessions(snap *proc.Snapshot, now time.Time) []orphanedSessio
 		// Session roots only — skip the inner process of a detached launcher.
 		if parent, ok := snap.LookupPID(p.PPID); ok &&
 			(parent.Kind == proc.KindClaude || parent.Kind == proc.KindCodex) {
+			continue
+		}
+		// Recent edits in its worktree => live work, never an orphan — even with
+		// no TTY (emdash/cursor agents run terminal-less). Stops the false
+		// positive where a live, busy worktree is labelled "orphaned".
+		if worktree.CwdRecentlyActive(p.Cwd, cfg, now) {
 			continue
 		}
 

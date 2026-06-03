@@ -110,20 +110,33 @@ func isActive(wt *Worktree, cfg config.Config, now time.Time) (bool, string) {
 	// the original script found sufficient once TTY-less shells were excluded.
 
 	// Signal 1: recent edits in a known source subdir.
-	cutoff := now.Add(-time.Duration(cfg.ActiveMinutes) * time.Minute)
-	for _, sub := range cfg.ActiveSubdirs {
-		dir := filepath.Join(wt.Path, sub)
-		if recentlyEdited(dir, cutoff) {
-			return true, "recent edits"
-		}
+	if CwdRecentlyActive(wt.Path, cfg, now) {
+		return true, "recent edits"
 	}
 	return false, ""
 }
 
-// recentlyEdited reports whether any regular file under dir (to a bounded depth)
+// CwdRecentlyActive reports whether a working directory shows recent file edits
+// in any configured active subdir. It is the liveness signal that does NOT rely
+// on a TTY — essential for harness-managed agents (emdash/cursor) that run with
+// no terminal, which the TTY-based orphan heuristic otherwise mislabels.
+func CwdRecentlyActive(cwd string, cfg config.Config, now time.Time) bool {
+	if cwd == "" {
+		return false
+	}
+	cutoff := now.Add(-time.Duration(cfg.ActiveMinutes) * time.Minute)
+	for _, sub := range cfg.ActiveSubdirs {
+		if RecentlyEdited(filepath.Join(cwd, sub), cutoff) {
+			return true
+		}
+	}
+	return false
+}
+
+// RecentlyEdited reports whether any regular file under dir (to a bounded depth)
 // was modified after cutoff. Depth is capped to keep the walk cheap on large
 // trees; node_modules and .git are skipped.
-func recentlyEdited(dir string, cutoff time.Time) bool {
+func RecentlyEdited(dir string, cutoff time.Time) bool {
 	const maxDepth = 4
 	base := strings.Count(dir, string(os.PathSeparator))
 	found := false
