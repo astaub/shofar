@@ -23,12 +23,26 @@ before you open a PR. The short version: contributors **propose** PRs against
 `main`; a maintainer reviews and merges. Never commit secrets or machine paths
 (this is a public repo).
 
+## Releasing (maintainers)
+
+CI (`.github/workflows/ci.yml`) runs vet/build/test on every push and PR. There
+is no release workflow on purpose: releases are cut **locally** so the Homebrew
+tap token never lives in GitHub. To publish a version:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+HOMEBREW_TAP_TOKEN=<pat-with-contents:write-on-astaub/homebrew-tap> \
+  goreleaser release --clean
+```
+
+That builds the darwin binaries, cuts the GitHub release, and updates the
+`astaub/homebrew-tap` formula, after which `brew install astaub/tap/shofar`
+works. Install goreleaser once with `brew install goreleaser`.
+
 ## Welcome PRs
 
 A few things that would genuinely help:
 
-- **Nested worktree discovery** — only flat `base/<worktree>` layouts are found
-  today; `base/<repo>/<branch>` is not yet discovered.
 - **Merged-worktree pruning** — detecting and reaping directories for worktrees
   whose branches have merged.
 - **More agent-CLI heuristics** — better idle/orphan detection for coding-agent

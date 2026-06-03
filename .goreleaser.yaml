@@ -33,10 +33,10 @@ release:
     name: shofar
 
 # Homebrew tap publishing. The tap repo astaub/homebrew-tap must exist, and a
-# HOMEBREW_TAP_TOKEN (a PAT with `contents:write` on the tap) must be available
-# when goreleaser runs — as a GitHub repo secret for CI releases, or exported in
-# the shell for a local `goreleaser release --clean`. After the next release:
-# `brew install astaub/tap/shofar`.
+# HOMEBREW_TAP_TOKEN (a PAT with `contents:write` on the tap) must be exported in
+# the shell when running `goreleaser release --clean`. Releases are cut locally
+# (no CI release workflow) so this token never lives in GitHub. After a release:
+# `brew install astaub/tap/shofar`. See CONTRIBUTING.md → Releasing.
 brews:
   - name: shofar
     repository:
