@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -425,37 +423,6 @@ func colorKind(k string) string {
 	}
 }
 
-// memRow is one row of the "memory by app" table in --json output.
-type memRow struct {
-	Label     string   `json:"label"`
-	Procs     int      `json:"procs"`
-	RSSBytes  uint64   `json:"rss_bytes"`
-	PctUsed   float64  `json:"pct_used"`
-	IdleCount int      `json:"idle_count,omitempty"`
-	Worktrees []string `json:"worktrees,omitempty"`
-}
-
-// memRows converts process groups into the JSON memory-by-app breakdown,
-// expressing each group's share of total used memory.
-func memRows(groups []processGroup, usedBytes uint64) []memRow {
-	rows := make([]memRow, 0, len(groups))
-	for _, g := range groups {
-		pct := 0.0
-		if usedBytes > 0 {
-			pct = float64(g.totalRSS) * 100 / float64(usedBytes)
-		}
-		rows = append(rows, memRow{
-			Label:     g.label,
-			Procs:     g.count,
-			RSSBytes:  g.totalRSS,
-			PctUsed:   pct,
-			IdleCount: g.idleCount,
-			Worktrees: g.worktrees,
-		})
-	}
-	return rows
-}
-
 // padRight pads s with spaces to n display columns, counting runes (not bytes)
 // so multibyte names like "@architect" or "x4" stay aligned in the table.
 func padRight(s string, n int) string {
@@ -692,40 +659,6 @@ type recItem struct {
 	Action string `json:"action"`
 }
 
-// wrapIndent soft-wraps text to width columns, indenting continuation lines so
-// multi-line recommendations stay readable under a bullet.
-func wrapIndent(text string, width int, indent string) string {
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	lineLen := 0
-	for i, w := range words {
-		if i > 0 {
-			if lineLen+1+len(w) > width {
-				b.WriteString("\n" + indent)
-				lineLen = len(indent)
-			} else {
-				b.WriteString(" ")
-				lineLen++
-			}
-		}
-		b.WriteString(w)
-		lineLen += len(w)
-	}
-	return b.String()
-}
-
-// processGroup is one row in the process table.
-type processGroup struct {
-	label     string   // display label, e.g. "claude (Emdash)" or "Chrome"
-	count     int
-	totalRSS  uint64
-	idleCount int
-	worktrees []string // distinct worktree names, for agent sessions
-}
-
 // skipNames: kernel/system noise not worth surfacing.
 var skipNames = map[string]bool{
 	"kernel_task": true, "launchd": true, "logd": true, "syslogd": true,
@@ -752,116 +685,6 @@ func isNoise(name string) bool {
 		}
 	}
 	return false
-}
-
-func buildGroups(snap *proc.Snapshot, now time.Time) []processGroup {
-	const minRSS = 50 << 20 // ignore groups under 50 MB
-	const topN = 14
-
-	type entry struct {
-		totalRSS  uint64
-		count     int
-		idleCount int
-		wtSet     map[string]bool
-	}
-	byLabel := map[string]*entry{}
-
-	add := func(label string, p *proc.Proc, idle bool, wt string) {
-		e := byLabel[label]
-		if e == nil {
-			e = &entry{wtSet: map[string]bool{}}
-			byLabel[label] = e
-		}
-		e.totalRSS += p.RSSBytes
-		e.count++
-		if idle {
-			e.idleCount++
-		}
-		if wt != "" {
-			e.wtSet[wt] = true
-		}
-	}
-
-	for _, p := range snap.Procs {
-		if p.RSSBytes == 0 {
-			continue
-		}
-
-		switch p.Kind {
-		case proc.KindClaude, proc.KindCodex, proc.KindCursorAgent:
-			// Agent CLIs: break down by spawn source so you see Emdash vs tmux vs terminal
-			source := spawnSource(p, snap)
-			label := string(p.Kind) + " (" + source + ")"
-
-			idle := false
-			const idleThresh = 6 * time.Hour
-			if p.Kind == proc.KindClaude || p.Kind == proc.KindCodex {
-				idleTime, hasTTY := proc.TTYIdle(p, now)
-				idle = !hasTTY || (hasTTY && idleTime >= idleThresh)
-			}
-
-			wt := cwdShortName(p.Cwd)
-			add(label, p, idle, wt)
-
-		default:
-			name := displayName(p.Command, p.Kind)
-			if name == "" || isNoise(name) {
-				continue
-			}
-			add(name, p, false, "")
-		}
-	}
-
-	var out []processGroup
-	for label, e := range byLabel {
-		if e.totalRSS < minRSS {
-			continue
-		}
-		g := processGroup{
-			label:    label,
-			count:    e.count,
-			totalRSS: e.totalRSS,
-			idleCount: e.idleCount,
-		}
-		for wt := range e.wtSet {
-			g.worktrees = append(g.worktrees, wt)
-		}
-		sort.Strings(g.worktrees)
-		out = append(out, g)
-	}
-
-	sort.Slice(out, func(i, j int) bool { return out[i].totalRSS > out[j].totalRSS })
-	if len(out) > topN {
-		out = out[:topN]
-	}
-	return out
-}
-
-// spawnSource walks the PPID chain to identify what spawned an agent CLI:
-// Emdash, tmux, a known terminal app, or falls back to "terminal".
-func spawnSource(p *proc.Proc, snap *proc.Snapshot) string {
-	pid := p.PPID
-	for depth := 0; depth < 6; depth++ {
-		parent, ok := snap.LookupPID(pid)
-		if !ok {
-			break
-		}
-		cmd := parent.Command
-		name := strings.ToLower(filepath.Base(strings.Fields(cmd)[0]))
-		switch {
-		case strings.Contains(strings.ToLower(cmd), "emdash"):
-			return "Emdash"
-		case name == "tmux" || name == "tmux: server":
-			return "tmux"
-		case name == "terminal", name == "iterm2", name == "alacritty", name == "kitty", name == "warp":
-			return name
-		}
-		pid = parent.PPID
-	}
-	if p.TTY == "" || p.TTY == "??" {
-		return "background"
-	}
-	return "terminal"
 }
 
 // cwdShortName extracts the last path component of a resolved cwd.
@@ -938,131 +761,11 @@ func emitJSON(v any) error {
 	return enc.Encode(v)
 }
 
-// chromeDomain is a domain with tab count from Chrome.
-type chromeDomain struct {
-	domain string
-	tabs   int
-}
-
-// chromeDomainsFromAppleScript queries Chrome via AppleScript to get open tab domains.
-// Returns empty slice if AppleScript fails or Chrome isn't running.
-func chromeDomainsFromAppleScript() []chromeDomain {
-	script := `tell application "Google Chrome"
-  set tabInfo to {}
-  repeat with w in windows
-    repeat with t in tabs of w
-      set end of tabInfo to URL of t
-    end repeat
-  end repeat
-  return tabInfo
-end tell`
-
-	cmd := exec.Command("osascript", "-e", script)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	domains := map[string]int{}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || !strings.HasPrefix(line, "http") {
-			continue
-		}
-		u, err := url.Parse(line)
-		if err != nil {
-			continue
-		}
-		host := u.Hostname()
-		if host == "" {
-			continue
-		}
-		host = strings.TrimPrefix(host, "www.")
-		domains[host]++
-	}
-
-	var result []chromeDomain
-	for domain, count := range domains {
-		result = append(result, chromeDomain{domain, count})
-	}
-	return result
-}
-
-// emdashWT is a worktree with Emdash sessions.
-type emdashWT struct {
-	name     string
-	rss      int64
-	sessions int
-}
-
 // orphanedSession is a suspicious claude/codex session.
 type orphanedSession struct {
-	wtName       string
-	idleMinutes  int
-	reason       string // "reparented", "no TTY", "idle Xh"
-}
-
-// emdashWorktreesFromProcs aggregates claude/codex sessions by worktree cwd.
-func emdashWorktreesFromProcs(snap *proc.Snapshot) []emdashWT {
-	byPath := map[string]*emdashWT{}
-
-	for _, p := range snap.Procs {
-		if p.RSSBytes == 0 {
-			continue
-		}
-		if p.Kind != proc.KindClaude && p.Kind != proc.KindCodex {
-			continue
-		}
-		// Only Emdash-spawned sessions
-		source := spawnSource(p, snap)
-		if source != "Emdash" {
-			continue
-		}
-
-		// Resolve cwd via lsof if needed
-		cwd := p.Cwd
-		if cwd == "" {
-			binLsof := "/usr/sbin/lsof"
-			cmd := exec.Command(binLsof, "-a", "-p", fmt.Sprintf("%d", p.PID), "-d", "cwd", "-Fn")
-			out, err := cmd.Output()
-			if err == nil {
-				for _, line := range strings.Split(string(out), "\n") {
-					if strings.HasPrefix(line, "n") {
-						cwd = line[1:]
-						break
-					}
-				}
-			}
-		}
-
-		// Extract worktree name from path: /Users/.../emdash/worktrees/.../<name>
-		wtName := ""
-		if strings.Contains(cwd, "/worktrees/") {
-			if idx := strings.Index(cwd, "/worktrees/"); idx >= 0 {
-				rest := cwd[idx+len("/worktrees/"):]
-				// Skip repo/team/branch levels, grab the leaf
-				parts := strings.Split(rest, "/")
-				wtName = parts[len(parts)-1]
-			}
-		}
-		if wtName == "" {
-			wtName = filepath.Base(cwd)
-		}
-
-		if _, ok := byPath[cwd]; !ok {
-			byPath[cwd] = &emdashWT{name: wtName, rss: 0, sessions: 0}
-		}
-		byPath[cwd].rss += int64(p.RSSBytes)
-		byPath[cwd].sessions++
-	}
-
-	var result []emdashWT
-	for _, wt := range byPath {
-		result = append(result, *wt)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].rss > result[j].rss })
-	return result
+	wtName      string
+	idleMinutes int
+	reason      string // "reparented", "no TTY", "idle Xh"
 }
 
 // detectOrphanedSessions finds claude/codex sessions that are genuinely orphaned
