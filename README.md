@@ -25,6 +25,8 @@ Requires macOS (uses `vm_stat`, `sysctl`, `ps`, `lsof`, `launchctl`).
 | Command | What it does |
 |---------|--------------|
 | `shofar status`  | Memory chart, what's using RAM (apps + agents-by-worktree), what to reclaim |
+| `shofar status --processes` | Expand each worktree into its processes, tagged by role (`agent` = leave it, `orphan` = reclaimable). Add `--all` to uncap. |
+| `shofar inspect <worktree>` | Per-process breakdown for one worktree — the live agent vs its children vs a reclaimable orphan. Read-only. |
 | `shofar capacity`| Can this machine take another worktree? (the agent gate) |
 | `shofar clean`   | Show — or `--kill` — safe-to-kill stale dev processes |
 | `shofar chrome`  | Per-tab memory via Chrome DevTools |
