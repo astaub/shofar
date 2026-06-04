@@ -41,6 +41,14 @@ type Config struct {
 	ProtectPatterns []string `json:"protect_patterns"`
 	// CleanupEnabled records whether scheduled auto-cleanup is turned on.
 	CleanupEnabled bool `json:"cleanup_enabled"`
+	// StrictPressure makes the capacity gate treat WARNING memory pressure as a
+	// hard block (room_for_n = 0), like critical does — the cautious posture for
+	// a shared machine doing other heavy work. Default false: warning lets the
+	// usable-headroom arithmetic decide (sticky swap/compression does not block
+	// when genuinely free memory is healthy). The --strict flag forces this on
+	// for a single invocation. Critical/unknown pressure always hard-gate
+	// regardless of this setting.
+	StrictPressure bool `json:"strict_pressure"`
 }
 
 // Default returns the built-in configuration.

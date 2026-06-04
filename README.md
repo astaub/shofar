@@ -27,7 +27,7 @@ Requires macOS (uses `vm_stat`, `sysctl`, `ps`, `lsof`, `launchctl`).
 | `shofar status`  | Memory chart, what's using RAM (apps + agents-by-worktree), what to reclaim |
 | `shofar status --processes` | Expand each worktree into its processes, tagged by role (`agent` = leave it, `orphan` = reclaimable). Add `--all` to uncap. |
 | `shofar inspect <worktree>` | Per-process breakdown for one worktree — the live agent vs its children vs a reclaimable orphan. Read-only. |
-| `shofar capacity`| Can this machine take another worktree? (the agent gate) |
+| `shofar capacity`| Can this machine take another worktree? (the agent gate). `--strict` for the cautious posture. |
 | `shofar clean`   | Show — or `--kill` — safe-to-kill stale dev processes |
 | `shofar chrome`  | Per-tab memory via Chrome DevTools |
 | `shofar cleanup` | `on`\|`off`\|`status` an hourly auto-clean LaunchAgent |
@@ -58,6 +58,15 @@ excludes the compressor from, on top of the held-back reserve) is still healthy.
 There, the headroom math decides and `pressure_sticky` is `true` — so a caller
 seeing `room_for_n: 0` can tell *truly full* (`pressure_sticky: false`) from
 *busy but has room*. This stops the gate from leaving a capable machine idle.
+
+**Posture.** The default suits a dedicated box: under `warning`, healthy headroom
+wins. On a shared machine doing other heavy work you may want caution — pass
+`--strict` (or set `"strict_pressure": true` in config) and `warning` hard-gates
+like `critical` does. Either way the verdict exposes both counts —
+`headroom_gated_room` (what the headroom math allows) and `pressure_gated_room`
+(what the cautious posture allows) — so a caller can see the trade-off behind
+`room_for_n` without reading raw bytes. `critical` and `unknown` always hard-gate
+regardless of posture.
 
 ## Use it as an agent skill
 

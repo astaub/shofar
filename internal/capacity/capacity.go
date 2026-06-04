@@ -36,7 +36,17 @@ type Verdict struct {
 	BudgetSource          string `json:"budget_source"` // "measured" | "default"
 	MeasuredWorktrees     int    `json:"measured_worktrees"`
 	RoomForN              int    `json:"room_for_n"`
-	Reason                string `json:"reason"`
+	// Strict reports whether the cautious posture is active (config or --strict):
+	// warning pressure hard-gates instead of letting headroom decide.
+	Strict bool `json:"strict"`
+	// PressureGatedRoom and HeadroomGatedRoom expose what each posture would
+	// permit, so a caller can see the trade-off behind room_for_n without reaching
+	// for raw bytes. PressureGatedRoom is the cautious count (0 unless pressure is
+	// normal); HeadroomGatedRoom is the pure usable-headroom count (ignores
+	// pressure). room_for_n equals one of these depending on Strict + pressure.
+	PressureGatedRoom int    `json:"pressure_gated_room"`
+	HeadroomGatedRoom int    `json:"headroom_gated_room"`
+	Reason            string `json:"reason"`
 }
 
 // Assess computes the capacity verdict from a memory snapshot and the current
@@ -61,6 +71,16 @@ func Assess(mem sysinfo.Memory, inv *worktree.Inventory, cfg config.Config) Verd
 		v.RoomForN = int(v.UsableHeadroomBytes / budget)
 	}
 
+	// Expose what each posture would permit. HeadroomGatedRoom is the pure
+	// usable-headroom count; PressureGatedRoom is the cautious count (only when
+	// pressure is normal). These are observability only — room_for_n below is the
+	// one a caller acts on.
+	v.HeadroomGatedRoom = v.RoomForN
+	if mem.Pressure == sysinfo.PressureNormal {
+		v.PressureGatedRoom = v.RoomForN
+	}
+	v.Strict = cfg.StrictPressure
+
 	// Critical and unknown pressure fail CLOSED, no matter the arithmetic.
 	// Critical means the kernel is aggressively reclaiming and may start killing
 	// processes; unknown (e.g. the sysctl could not be read) means we cannot
@@ -76,6 +96,17 @@ func Assess(mem sysinfo.Memory, inv *worktree.Inventory, cfg config.Config) Verd
 		v.OK = false
 		v.RoomForN = 0
 		v.Reason = "memory pressure could not be read; refusing to approve new work while the signal is unknown"
+		return v
+	}
+
+	// Strict posture (config or --strict): treat warning as a hard gate too, the
+	// cautious choice for a shared machine. Critical/unknown already returned
+	// above; only warning is affected here. Default (non-strict) falls through to
+	// the headroom arithmetic below.
+	if cfg.StrictPressure && mem.Pressure == sysinfo.PressureWarning {
+		v.OK = false
+		v.RoomForN = 0
+		v.Reason = "strict: memory pressure is warning; free memory before starting new work"
 		return v
 	}
 

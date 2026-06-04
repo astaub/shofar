@@ -53,6 +53,9 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	if hasFlag(args, "--strict") {
+		s.cfg.StrictPressure = true
+	}
 	verdict := capacity.Assess(s.mem, s.inv, s.cfg)
 	cands := cleaner.Select(s.cfg, s.snap, s.inv, s.now)
 	consumers, allProcRSS, agentChildren := buildConsumers(s.snap)
