@@ -19,8 +19,16 @@ import (
 
 // Verdict is the capacity decision, designed to serialize cleanly for agents.
 type Verdict struct {
-	OK                    bool   `json:"ok"`
-	Pressure              string `json:"pressure"`
+	OK       bool   `json:"ok"`
+	Pressure string `json:"pressure"`
+	// PressureSticky distinguishes "genuinely full" from "just conservative".
+	// It is true when the kernel reports warning pressure but usable headroom
+	// (which already excludes the compressor) still covers at least one
+	// worktree — i.e. the pressure is driven by pinned swap / a large
+	// compressor backlog rather than exhausted free memory. A caller seeing
+	// room_for_n == 0 can read this to tell "truly full" (false) from "the
+	// machine is busy but has room" (true).
+	PressureSticky        bool   `json:"pressure_sticky"`
 	AvailableBytes        uint64 `json:"available_bytes"`
 	ReserveBytes          uint64 `json:"reserve_bytes"`
 	UsableHeadroomBytes   uint64 `json:"usable_headroom_bytes"`
@@ -28,7 +36,17 @@ type Verdict struct {
 	BudgetSource          string `json:"budget_source"` // "measured" | "default"
 	MeasuredWorktrees     int    `json:"measured_worktrees"`
 	RoomForN              int    `json:"room_for_n"`
-	Reason                string `json:"reason"`
+	// Strict reports whether the cautious posture is active (config or --strict):
+	// warning pressure hard-gates instead of letting headroom decide.
+	Strict bool `json:"strict"`
+	// PressureGatedRoom and HeadroomGatedRoom expose what each posture would
+	// permit, so a caller can see the trade-off behind room_for_n without reaching
+	// for raw bytes. PressureGatedRoom is the cautious count (0 unless pressure is
+	// normal); HeadroomGatedRoom is the pure usable-headroom count (ignores
+	// pressure). room_for_n equals one of these depending on Strict + pressure.
+	PressureGatedRoom int    `json:"pressure_gated_room"`
+	HeadroomGatedRoom int    `json:"headroom_gated_room"`
+	Reason            string `json:"reason"`
 }
 
 // Assess computes the capacity verdict from a memory snapshot and the current
@@ -53,25 +71,67 @@ func Assess(mem sysinfo.Memory, inv *worktree.Inventory, cfg config.Config) Verd
 		v.RoomForN = int(v.UsableHeadroomBytes / budget)
 	}
 
-	// Pressure is a hard gate, and it fails CLOSED. Only an explicit "normal"
-	// reading lets the arithmetic decide. Warning/critical means the kernel is
-	// already reclaiming; unknown (e.g. the sysctl could not be read) means we
-	// can't prove it's safe — both block new work.
-	if mem.Pressure != sysinfo.PressureNormal {
+	// Expose what each posture would permit. HeadroomGatedRoom is the pure
+	// usable-headroom count; PressureGatedRoom is the cautious count (only when
+	// pressure is normal). These are observability only — room_for_n below is the
+	// one a caller acts on.
+	v.HeadroomGatedRoom = v.RoomForN
+	if mem.Pressure == sysinfo.PressureNormal {
+		v.PressureGatedRoom = v.RoomForN
+	}
+	v.Strict = cfg.StrictPressure
+
+	// Critical and unknown pressure fail CLOSED, no matter the arithmetic.
+	// Critical means the kernel is aggressively reclaiming and may start killing
+	// processes; unknown (e.g. the sysctl could not be read) means we cannot
+	// prove it's safe. Approving new work in either case is exactly what shofar
+	// exists to prevent.
+	switch mem.Pressure {
+	case sysinfo.PressureCritical:
 		v.OK = false
 		v.RoomForN = 0
-		if mem.Pressure == sysinfo.PressureUnknown {
-			v.Reason = "memory pressure could not be read; refusing to approve new work while the signal is unknown"
-		} else {
-			v.Reason = "memory pressure is " + mem.Pressure.String() + "; free memory before starting new work"
-		}
+		v.Reason = "memory pressure is critical; free memory before starting new work"
+		return v
+	case sysinfo.PressureUnknown:
+		v.OK = false
+		v.RoomForN = 0
+		v.Reason = "memory pressure could not be read; refusing to approve new work while the signal is unknown"
 		return v
 	}
 
-	if v.RoomForN >= 1 {
+	// Strict posture (config or --strict): treat warning as a hard gate too, the
+	// cautious choice for a shared machine. Critical/unknown already returned
+	// above; only warning is affected here. Default (non-strict) falls through to
+	// the headroom arithmetic below.
+	if cfg.StrictPressure && mem.Pressure == sysinfo.PressureWarning {
+		v.OK = false
+		v.RoomForN = 0
+		v.Reason = "strict: memory pressure is warning; free memory before starting new work"
+		return v
+	}
+
+	// Pressure is now normal or warning, and the usable-headroom arithmetic
+	// decides. Warning no longer hard-zeros room_for_n: on a busy dev machine
+	// "warning" is often sticky — pinned swap and a large compressor backlog
+	// keep the kernel signal elevated while genuinely free memory is still
+	// healthy. AvailableBytes already excludes the compressor, and the reserve
+	// is held back on top of that, so the arithmetic is the real safety gate
+	// here. Hard-gating to 0 under warning left capable machines idle and forced
+	// callers to read raw free/swap behind the verdict. Critical still fails
+	// closed above.
+	v.PressureSticky = mem.Pressure == sysinfo.PressureWarning && v.RoomForN >= 1
+
+	switch {
+	case v.PressureSticky:
+		v.OK = true
+		v.Reason = "memory pressure is warning, but usable headroom covers at least one more worktree; pressure looks driven by swap/compression, not exhausted free memory"
+	case v.RoomForN >= 1:
 		v.OK = true
 		v.Reason = "headroom for at least one more worktree at the current per-worktree budget"
-	} else {
+	case mem.Pressure == sysinfo.PressureWarning:
+		v.OK = false
+		v.Reason = "memory pressure is warning and usable headroom is below one worktree budget; free memory before starting new work"
+	default:
 		v.OK = false
 		v.Reason = "not enough headroom for another worktree at the current per-worktree budget"
 	}

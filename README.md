@@ -25,7 +25,9 @@ Requires macOS (uses `vm_stat`, `sysctl`, `ps`, `lsof`, `launchctl`).
 | Command | What it does |
 |---------|--------------|
 | `shofar status`  | Memory chart, what's using RAM (apps + agents-by-worktree), what to reclaim |
-| `shofar capacity`| Can this machine take another worktree? (the agent gate) |
+| `shofar status --processes` | Expand each worktree into its processes, tagged by role (`agent` = leave it, `orphan` = reclaimable). Add `--all` to uncap. |
+| `shofar inspect <worktree>` | Per-process breakdown for one worktree — the live agent vs its children vs a reclaimable orphan. Read-only. |
+| `shofar capacity`| Can this machine take another worktree? (the agent gate). `--strict` for the cautious posture. |
 | `shofar clean`   | Show — or `--kill` — safe-to-kill stale dev processes |
 | `shofar chrome`  | Per-tab memory via Chrome DevTools |
 | `shofar cleanup` | `on`\|`off`\|`status` an hourly auto-clean LaunchAgent |
@@ -38,15 +40,33 @@ Every read command takes `--json`. `clean` is a dry run unless you pass `--kill`
 
 ```sh
 $ shofar capacity --json
-{ "ok": true, "pressure": "normal", "room_for_n": 3,
+{ "ok": true, "pressure": "warning", "pressure_sticky": true, "room_for_n": 3,
   "per_worktree_budget_bytes": 1572864000, "budget_source": "measured",
-  "reason": "headroom for at least one more worktree …" }
+  "reason": "memory pressure is warning, but usable headroom covers …" }
 ```
 
-An agent checks `ok` before spawning a worktree. The verdict = VM pressure (a
-hard gate) + usable headroom (available − an OS reserve) ÷ a per-worktree budget
-(*measured* from your live worktrees, or a default). `room_for_n` is how many
+An agent checks `ok` before spawning a worktree. The verdict = usable headroom
+(available − an OS reserve) ÷ a per-worktree budget (*measured* from your live
+worktrees, or a default), with VM pressure as a guard. `room_for_n` is how many
 more fit.
+
+Pressure is not a blanket veto. **Critical** (or an unreadable signal) fails
+closed — `room_for_n: 0`, no matter the arithmetic. But **warning** is often
+*sticky* on a busy dev Mac: the kernel signal stays elevated from pinned swap and
+a large compressor backlog while genuinely free memory (which `available` already
+excludes the compressor from, on top of the held-back reserve) is still healthy.
+There, the headroom math decides and `pressure_sticky` is `true` — so a caller
+seeing `room_for_n: 0` can tell *truly full* (`pressure_sticky: false`) from
+*busy but has room*. This stops the gate from leaving a capable machine idle.
+
+**Posture.** The default suits a dedicated box: under `warning`, healthy headroom
+wins. On a shared machine doing other heavy work you may want caution — pass
+`--strict` (or set `"strict_pressure": true` in config) and `warning` hard-gates
+like `critical` does. Either way the verdict exposes both counts —
+`headroom_gated_room` (what the headroom math allows) and `pressure_gated_room`
+(what the cautious posture allows) — so a caller can see the trade-off behind
+`room_for_n` without reading raw bytes. `critical` and `unknown` always hard-gate
+regardless of posture.
 
 ## Use it as an agent skill
 

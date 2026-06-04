@@ -53,12 +53,25 @@ func cmdStatus(args []string) error {
 	if err != nil {
 		return err
 	}
+	if hasFlag(args, "--strict") {
+		s.cfg.StrictPressure = true
+	}
 	verdict := capacity.Assess(s.mem, s.inv, s.cfg)
 	cands := cleaner.Select(s.cfg, s.snap, s.inv, s.now)
 	consumers, allProcRSS, agentChildren := buildConsumers(s.snap)
 	chrome := chromeBreakdown(s.snap)
 	orphans := detectOrphanedSessions(s.snap, s.cfg, s.now)
 	recs := buildRecommendations(s, consumers, cands)
+
+	// Opt-in per-worktree process breakdown (--processes). Off by default so
+	// status stays a leaderboard, not htop. Populated for both the JSON and human
+	// views; the extra cwd-resolution cost is paid only when asked.
+	var wtProcs []inspectOut
+	if hasFlag(args, "--processes") {
+		for _, wt := range s.inv.WithProcs() {
+			wtProcs = append(wtProcs, buildInspect(s.snap, wt, s.now))
+		}
+	}
 
 	// Per-tab Chrome memory, but only when a debug Chrome is exposing DevTools.
 	// Cheap when absent: a closed port refuses the connection instantly. Launch
@@ -85,6 +98,7 @@ func cmdStatus(args []string) error {
 			"recommendations":    recs,
 			"cleanup_candidates": len(cands),
 			"cleanup_enabled":    s.cfg.CleanupEnabled,
+			"worktree_processes": wtProcs,
 		})
 	}
 
@@ -327,6 +341,32 @@ func cmdStatus(args []string) error {
 			fmt.Printf("  %s  →  %s\n", bold(padRight(r.Target, w)), r.Action)
 		}
 		fmt.Println()
+	}
+
+	// ── Processes by worktree (opt-in: --processes) ───────────────────────────
+	// Expands each worktree into its processes with roles (agent / agent-child /
+	// orphan), so "what's safe to kill" is legible without a manual lsof. Capped
+	// to the heaviest few per worktree unless --all; read-only, like the rest.
+	if hasFlag(args, "--processes") {
+		topN := 8
+		if hasFlag(args, "--all") {
+			topN = 0
+		}
+		if len(wtProcs) == 0 {
+			fmt.Println("Processes by worktree  ·  none attributed")
+			fmt.Println()
+		} else {
+			fmt.Println("Processes by worktree  (roles: agent = leave it, orphan = reclaimable)")
+			for _, o := range wtProcs {
+				act := "idle"
+				if o.Worktree.Active {
+					act = "active"
+				}
+				fmt.Printf("\n  %s  %s  ·  %s\n", bold(o.Worktree.Name), fmtBytes(o.Worktree.RSSBytes), act)
+				printProcTable(o.Processes, s.now, topN)
+			}
+			fmt.Println()
+		}
 	}
 
 	// ── Cleanup ───────────────────────────────────────────────────────────────

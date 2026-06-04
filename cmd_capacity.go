@@ -12,6 +12,11 @@ func cmdCapacity(args []string) error {
 	if err != nil {
 		return err
 	}
+	// --strict forces the cautious posture for this invocation; the config field
+	// is the persistent setting. The flag can only turn it on.
+	if hasFlag(args, "--strict") {
+		s.cfg.StrictPressure = true
+	}
 	v := capacity.Assess(s.mem, s.inv, s.cfg)
 
 	if jsonOut {
@@ -24,6 +29,9 @@ func cmdCapacity(args []string) error {
 	}
 	fmt.Printf("%s — %s\n", mark, v.Reason)
 	fmt.Printf("  pressure:        %s\n", v.Pressure)
+	if v.PressureSticky {
+		fmt.Printf("  pressure note:   sticky (swap/compression elevated; usable free memory still healthy)\n")
+	}
 	fmt.Printf("  available:       %s\n", fmtBytes(v.AvailableBytes))
 	fmt.Printf("  reserve:         %s\n", fmtBytes(v.ReserveBytes))
 	fmt.Printf("  usable headroom: %s\n", fmtBytes(v.UsableHeadroomBytes))
@@ -32,5 +40,11 @@ func cmdCapacity(args []string) error {
 		fmt.Printf(" from %d worktree(s)", v.MeasuredWorktrees)
 	}
 	fmt.Printf(")\n  room for:        %d more worktree(s)\n", v.RoomForN)
+	posture := "default (headroom decides under warning)"
+	if v.Strict {
+		posture = "strict (warning hard-gates)"
+	}
+	fmt.Printf("  posture:         %s\n", posture)
+	fmt.Printf("  if headroom-only: %d   ·   if pressure-strict: %d\n", v.HeadroomGatedRoom, v.PressureGatedRoom)
 	return nil
 }

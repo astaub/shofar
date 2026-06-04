@@ -39,6 +39,8 @@ func main() {
 	switch cmd {
 	case "status":
 		err = cmdStatus(args)
+	case "inspect":
+		err = cmdInspect(args)
 	case "capacity":
 		err = cmdCapacity(args)
 	case "clean":
@@ -70,8 +72,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `shofar 🐏 — macOS RAM guard for dev-worktree workflows
 
 Usage:
-  shofar status   [--json]            Memory + worktree + cleanup overview
-  shofar capacity [--json]            Can this machine take another worktree?
+  shofar status   [--processes] [--all] [--strict] [--json]  Memory + worktree + cleanup overview
+  shofar inspect  <worktree> [--json]  Per-process breakdown for one worktree
+  shofar capacity [--strict] [--json]  Can this machine take another worktree?
   shofar clean    [--kill] [--json]   Show (default) or kill safe stale procs
   shofar chrome   [--port N] [--json]  Per-tab memory via Chrome DevTools
   shofar update   [--check]            Rebuild + reinstall from source
