@@ -24,6 +24,9 @@ func cmdCapacity(args []string) error {
 	}
 	fmt.Printf("%s — %s\n", mark, v.Reason)
 	fmt.Printf("  pressure:        %s\n", v.Pressure)
+	if v.PressureSticky {
+		fmt.Printf("  pressure note:   sticky (swap/compression elevated; usable free memory still healthy)\n")
+	}
 	fmt.Printf("  available:       %s\n", fmtBytes(v.AvailableBytes))
 	fmt.Printf("  reserve:         %s\n", fmtBytes(v.ReserveBytes))
 	fmt.Printf("  usable headroom: %s\n", fmtBytes(v.UsableHeadroomBytes))
